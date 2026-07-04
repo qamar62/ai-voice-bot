@@ -40,13 +40,27 @@
   .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f87171; margin-right: 8px; vertical-align: 1px; }
   .status.on .dot { background: #4ade80; }
 
-  .transcript {
-    max-width: 460px; width: 100%; min-height: 44px; text-align: center;
-    font-size: 14px; line-height: 1.5; color: rgba(255,255,255,0.85);
-    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 14px; padding: 10px 16px; backdrop-filter: blur(6px);
+  .chat {
+    max-width: 520px; width: 100%; max-height: 240px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px; backdrop-filter: blur(6px); scroll-behavior: smooth;
   }
-  .transcript:empty::before { content: "Press Start and speak to Fiva…"; color: rgba(255,255,255,0.4); }
+  .chat:empty::after { content: "Press Start and speak to Fiva…"; color: rgba(255,255,255,0.4); font-size: 13px; text-align: center; }
+  .msg { max-width: 85%; padding: 8px 13px; border-radius: 14px; font-size: 13px; line-height: 1.5; word-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: var(--teal-500); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.user.interim { opacity: 0.6; }
+  .msg.bot { align-self: flex-start; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.92); border-bottom-left-radius: 4px; }
+
+  .typebar { display: none; max-width: 520px; width: 100%; gap: 8px; }
+  .typebar input {
+    flex: 1; padding: 11px 16px; border-radius: 999px; font-size: 14px;
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2);
+    color: #fff; outline: none;
+  }
+  .typebar input::placeholder { color: rgba(255,255,255,0.4); }
+  .typebar input:focus { border-color: var(--teal-300); }
+  .typebar button { padding: 11px 20px; background: var(--teal-500); border: 1px solid rgba(255,255,255,0.3); }
 
   .controls { display: flex; gap: 14px; }
   button {
@@ -81,7 +95,11 @@
   </div>
 
   <div class="status" id="status"><span class="dot"></span>Not connected</div>
-  <div class="transcript" id="transcript"></div>
+  <div class="chat" id="chat"></div>
+  <div class="typebar" id="typebar">
+    <input type="text" id="typeInput" placeholder="Type email or phone here if easier…" autocomplete="off" />
+    <button id="typeSend">Send</button>
+  </div>
 
   <div class="controls">
     <button id="startBtn">▶ &nbsp;Start call</button>
@@ -104,8 +122,41 @@
   const orb = document.getElementById("orb");
   const ring1 = document.getElementById("ring1");
   const ring2 = document.getElementById("ring2");
-  const transcriptEl = document.getElementById("transcript");
+  const chatEl = document.getElementById("chat");
+  const typebar = document.getElementById("typebar");
+  const typeInput = document.getElementById("typeInput");
+  const typeSend = document.getElementById("typeSend");
   const botAudio = document.getElementById("botAudio");
+
+  // --- chat log helpers ---------------------------------------------------
+  let interimUserEl = null;   // live (not yet final) user speech bubble
+  let currentBotEl = null;    // bot bubble being extended this turn
+
+  function addMsg(role, text, interim) {
+    const el = document.createElement("div");
+    el.className = "msg " + role + (interim ? " interim" : "");
+    el.textContent = text;
+    chatEl.appendChild(el);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return el;
+  }
+
+  function onUserText(text, final) {
+    currentBotEl = null; // user turn started → next bot text is a new bubble
+    if (!interimUserEl) interimUserEl = addMsg("user", text, true);
+    else interimUserEl.textContent = text;
+    if (final) {
+      interimUserEl.classList.remove("interim");
+      interimUserEl = null;
+    }
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function onBotText(text) {
+    if (!currentBotEl) currentBotEl = addMsg("bot", text, false);
+    else currentBotEl.textContent += " " + text;
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
 
   let pc = null, micStream = null, audioCtx = null, rafId = null, muted = false;
   let dc = null, pingTimer = null, botSpeaking = false;
@@ -181,17 +232,10 @@
       const data = d.data || {};
       switch (d.type) {
         case "user-transcription":
-          if (data.text) {
-            transcriptEl.textContent = "You: " + data.text;
-            transcriptEl.style.opacity = data.final ? "1" : "0.65";
-          }
+          if (data.text) onUserText(data.text, !!data.final);
           break;
-        case "bot-transcription":
-        case "bot-tts-text":
-          if (data.text) {
-            transcriptEl.textContent = "Fiva: " + data.text;
-            transcriptEl.style.opacity = "1";
-          }
+        case "bot-transcription": // sentence-level; ignore word-level bot-tts-text
+          if (data.text) onBotText(data.text);
           break;
         case "bot-started-speaking":
           botSpeaking = true;
@@ -199,11 +243,29 @@
           break;
         case "bot-stopped-speaking":
           botSpeaking = false;
+          currentBotEl = null;
           setStatus("Connected — Fiva is listening", true);
           break;
       }
     };
   }
+
+  // Typed input (email/phone are easier to type than to spell out loud)
+  function sendTyped() {
+    const text = typeInput.value.trim();
+    if (!text || !dc || dc.readyState !== "open") return;
+    dc.send(JSON.stringify({
+      id: "t-" + Date.now(),
+      label: "rtvi-ai",
+      type: "send-text",
+      data: { content: text, options: { run_immediately: true, audio_response: true } },
+    }));
+    addMsg("user", text, false);
+    currentBotEl = null;
+    typeInput.value = "";
+  }
+  typeSend.addEventListener("click", sendTyped);
+  typeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendTyped(); });
 
   async function startCall() {
     startBtn.disabled = true;
@@ -254,6 +316,7 @@
         startBtn.style.display = "none";
         endBtn.style.display = "flex";
         muteBtn.style.display = "flex";
+        typebar.style.display = "flex";
       } else if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
         endCall();
       }
@@ -294,11 +357,12 @@
   function endCall() {
     cleanup();
     setStatus("Call ended");
-    transcriptEl.textContent = "";
+    interimUserEl = null; currentBotEl = null;
     startBtn.disabled = false;
     startBtn.style.display = "flex";
     endBtn.style.display = "none";
     muteBtn.style.display = "none";
+    typebar.style.display = "none";
     muteBtn.classList.remove("muted"); muted = false; muteBtn.textContent = "🎙 Mute";
   }
 
