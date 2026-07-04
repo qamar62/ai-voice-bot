@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fiva — Five Vertex Tours Voice Assistant</title>
+<style>
+  :root {
+    --teal-950: #063833; --teal-900: #0A4D48; --teal-700: #0F6F6A;
+    --teal-500: #12827A; --teal-300: #3AB3AB; --teal-100: #C2EAE8; --teal-50: #E8F7F6;
+    --yellow: #FDE047;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 28px; padding: 24px;
+    background: radial-gradient(1200px 800px at 50% -10%, var(--teal-900), var(--teal-950));
+    color: #fff;
+  }
+  .brand { text-align: center; }
+  .brand h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
+  .brand p { margin-top: 6px; font-size: 13px; color: var(--teal-100); }
+
+  /* Voice orb */
+  .orb-wrap { position: relative; width: 190px; height: 190px; display: grid; place-items: center; }
+  .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid rgba(58,179,171,0.35); transition: transform 0.12s ease-out, opacity 0.3s; }
+  .ring.r2 { inset: -16px; border-color: rgba(58,179,171,0.18); }
+  .orb {
+    width: 150px; height: 150px; border-radius: 50%;
+    background: linear-gradient(145deg, var(--teal-300), var(--teal-500) 55%, var(--teal-700));
+    box-shadow: 0 0 60px rgba(18,130,122,0.55), inset 0 -12px 30px rgba(6,56,51,0.45);
+    display: grid; place-items: center; transition: transform 0.12s ease-out;
+  }
+  .orb svg { width: 54px; height: 54px; fill: #fff; opacity: 0.95; }
+  .orb.listening { animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 0%,100% { box-shadow: 0 0 45px rgba(18,130,122,0.45), inset 0 -12px 30px rgba(6,56,51,0.45);} 50% { box-shadow: 0 0 85px rgba(58,179,171,0.75), inset 0 -12px 30px rgba(6,56,51,0.45);} }
+
+  .status { font-size: 14px; color: var(--teal-100); min-height: 20px; text-align: center; }
+  .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f87171; margin-right: 8px; vertical-align: 1px; }
+  .status.on .dot { background: #4ade80; }
+
+  .transcript {
+    max-width: 460px; width: 100%; min-height: 44px; text-align: center;
+    font-size: 14px; line-height: 1.5; color: rgba(255,255,255,0.85);
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px; padding: 10px 16px; backdrop-filter: blur(6px);
+  }
+  .transcript:empty::before { content: "Press Start and speak to Fiva…"; color: rgba(255,255,255,0.4); }
+
+  .controls { display: flex; gap: 14px; }
+  button {
+    border: none; cursor: pointer; font-size: 15px; font-weight: 600;
+    padding: 14px 30px; border-radius: 999px; transition: all 0.25s;
+    display: flex; align-items: center; gap: 9px; color: #fff;
+  }
+  #startBtn { background: linear-gradient(90deg, var(--teal-700), var(--teal-500), var(--teal-300)); box-shadow: 0 6px 28px rgba(18,130,122,0.5); border: 1px solid rgba(255,255,255,0.35); }
+  #startBtn:hover { transform: scale(1.04); box-shadow: 0 6px 38px rgba(58,179,171,0.7); }
+  #endBtn { background: rgba(248,113,113,0.15); border: 1px solid rgba(248,113,113,0.5); color: #fca5a5; display: none; }
+  #endBtn:hover { background: rgba(248,113,113,0.3); }
+  #muteBtn { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.25); display: none; }
+  #muteBtn.muted { background: var(--yellow); color: var(--teal-950); }
+  button:disabled { opacity: 0.5; cursor: wait; transform: none !important; }
+
+  .foot { font-size: 11px; color: rgba(255,255,255,0.35); text-align: center; }
+  .foot a { color: var(--teal-300); text-decoration: none; }
+</style>
+</head>
+<body>
+  <div class="brand">
+    <h1>✦ Talk to Fiva</h1>
+    <p>Five Vertex Tours — AI voice assistant. Ask about activities, prices &amp; bookings.</p>
+  </div>
+
+  <div class="orb-wrap">
+    <div class="ring" id="ring1"></div>
+    <div class="ring r2" id="ring2"></div>
+    <div class="orb" id="orb">
+      <svg viewBox="0 0 24 24"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.94V22h2v-3.06A8 8 0 0 0 20 11h-2Z"/></svg>
+    </div>
+  </div>
+
+  <div class="status" id="status"><span class="dot"></span>Not connected</div>
+  <div class="transcript" id="transcript"></div>
+
+  <div class="controls">
+    <button id="startBtn">▶ &nbsp;Start call</button>
+    <button id="muteBtn">🎙 Mute</button>
+    <button id="endBtn">✕ &nbsp;End call</button>
+  </div>
+
+  <p class="foot">Powered by Five Vertex Tours · <a href="https://five.tours">five.tours</a></p>
+
+  <audio id="botAudio" autoplay playsinline></audio>
+
+<script>
+(function () {
+  const API_OFFER = "/api/offer"; // same origin — nginx proxies to the bot
+
+  const startBtn = document.getElementById("startBtn");
+  const endBtn = document.getElementById("endBtn");
+  const muteBtn = document.getElementById("muteBtn");
+  const statusEl = document.getElementById("status");
+  const orb = document.getElementById("orb");
+  const ring1 = document.getElementById("ring1");
+  const ring2 = document.getElementById("ring2");
+  const transcriptEl = document.getElementById("transcript");
+  const botAudio = document.getElementById("botAudio");
+
+  let pc = null, micStream = null, audioCtx = null, rafId = null, muted = false;
+
+  function setStatus(text, connected) {
+    statusEl.innerHTML = '<span class="dot"></span>' + text;
+    statusEl.classList.toggle("on", !!connected);
+  }
+
+  function waitIceComplete(pc) {
+    return new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") return resolve();
+      const check = () => {
+        if (pc.iceGatheringState === "complete") {
+          pc.removeEventListener("icegatheringstatechange", check);
+          resolve();
+        }
+      };
+      pc.addEventListener("icegatheringstatechange", check);
+      setTimeout(resolve, 3000); // fallback: don't wait forever
+    });
+  }
+
+  // Animate orb with the bot's output audio level
+  function startVisualizer(remoteStream) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(remoteStream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const loop = () => {
+      analyser.getByteFrequencyData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i];
+      const level = sum / data.length / 255; // 0..1
+      const s = 1 + level * 0.25;
+      orb.style.transform = `scale(${s})`;
+      ring1.style.transform = `scale(${1 + level * 0.45})`;
+      ring2.style.transform = `scale(${1 + level * 0.7})`;
+      rafId = requestAnimationFrame(loop);
+    };
+    loop();
+  }
+
+  // Optional live transcripts via the RTVI data channel (best effort)
+  function attachDataChannel(pc) {
+    pc.ondatachannel = (ev) => {
+      ev.channel.onmessage = (msg) => {
+        try {
+          const d = JSON.parse(msg.data);
+          const t = d.type || (d.label ? d.label : "");
+          if (t.includes("transcript") || t.includes("Transcription") || t === "bot-tts-text") {
+            const text = (d.data && (d.data.text || d.data.transcript)) || d.text;
+            if (text) transcriptEl.textContent = text;
+          }
+        } catch (_) { /* non-JSON frames are fine */ }
+      };
+    };
+  }
+
+  async function startCall() {
+    startBtn.disabled = true;
+    setStatus("Requesting microphone…");
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      setStatus("Microphone blocked — allow access and retry");
+      startBtn.disabled = false;
+      return;
+    }
+
+    setStatus("Connecting to Fiva…");
+    pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        // TURN relay — required because signaling runs through Cloudflare Tunnel
+        // (audio can't pass the tunnel). Must match your coturn user/secret.
+        {
+          urls: "turn:turn.five.tours:3478",
+          username: "fiva",
+          credential: "CHANGE_THIS_SECRET",
+        },
+      ],
+    });
+    micStream.getTracks().forEach((t) => pc.addTrack(t, micStream));
+    pc.addTransceiver("audio", { direction: "sendrecv" });
+
+    pc.ontrack = (ev) => {
+      botAudio.srcObject = ev.streams[0];
+      startVisualizer(ev.streams[0]);
+    };
+    attachDataChannel(pc);
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") {
+        setStatus("Connected — Fiva is listening", true);
+        orb.classList.add("listening");
+        startBtn.style.display = "none";
+        endBtn.style.display = "flex";
+        muteBtn.style.display = "flex";
+      } else if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        endCall();
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIceComplete(pc);
+
+    try {
+      const resp = await fetch(API_OFFER, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+      });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const answer = await resp.json();
+      await pc.setRemoteDescription(answer);
+    } catch (e) {
+      setStatus("Could not reach the assistant — try again shortly");
+      cleanup();
+      startBtn.disabled = false;
+    }
+  }
+
+  function cleanup() {
+    if (rafId) cancelAnimationFrame(rafId);
+    if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
+    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+    if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+    orb.classList.remove("listening");
+    orb.style.transform = ""; ring1.style.transform = ""; ring2.style.transform = "";
+  }
+
+  function endCall() {
+    cleanup();
+    setStatus("Call ended");
+    transcriptEl.textContent = "";
+    startBtn.disabled = false;
+    startBtn.style.display = "flex";
+    endBtn.style.display = "none";
+    muteBtn.style.display = "none";
+    muteBtn.classList.remove("muted"); muted = false; muteBtn.textContent = "🎙 Mute";
+  }
+
+  function toggleMute() {
+    if (!micStream) return;
+    muted = !muted;
+    micStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+    muteBtn.classList.toggle("muted", muted);
+    muteBtn.textContent = muted ? "🔇 Unmute" : "🎙 Mute";
+  }
+
+  startBtn.addEventListener("click", startCall);
+  endBtn.addEventListener("click", endCall);
+  muteBtn.addEventListener("click", toggleMute);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+services:
+  fiva-bot:
+    build: .
+    container_name: fiva-bot
+    env_file: .env
+    # host networking: WebRTC media uses dynamic UDP ports — mapping them
+    # individually is impractical. Host mode gives aiortc direct access.
+    network_mode: host
+    volumes:
+      - ../data:/app/data:ro    # agents.json / settings.json (Fiva's prompt)
+    restart: unless-stopped
+
+  voice-web:
+    image: nginx:alpine
+    container_name: fiva-web
+    network_mode: host          # serves on localhost:8090 (see nginx.conf)
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - fiva-bot
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: fiva-turn
+    network_mode: host
+    # CHANGE the password below, and set your real public IP / hostname.
+    command: >
+      --listening-port=3478
+      --min-port=49160 --max-port=49200
+      --realm=turn.five.tours
+      --user=fiva:CHANGE_THIS_SECRET
+      --lt-cred-mech
+      --fingerprint
+      --no-cli
+      --no-tls --no-dtls
+    restart: unless-stopped

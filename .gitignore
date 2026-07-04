@@ -1,0 +1,11 @@
+# Secrets — never commit (API keys live here)
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Logs / runtime
+*.log
