@@ -108,6 +108,8 @@
   const botAudio = document.getElementById("botAudio");
 
   let pc = null, micStream = null, audioCtx = null, rafId = null, muted = false;
+  let dc = null, pingTimer = null, botSpeaking = false;
+  let botAnalyser = null, micAnalyser = null;
 
   function setStatus(text, connected) {
     statusEl.innerHTML = '<span class="dot"></span>' + text;
@@ -128,41 +130,78 @@
     });
   }
 
-  // Animate orb with the bot's output audio level
-  function startVisualizer(remoteStream) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const src = audioCtx.createMediaStreamSource(remoteStream);
+  function makeAnalyser(stream) {
+    const src = audioCtx.createMediaStreamSource(stream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 256;
     src.connect(analyser);
-    const data = new Uint8Array(analyser.frequencyBinCount);
+    return analyser;
+  }
+
+  function levelOf(analyser, buf) {
+    analyser.getByteFrequencyData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i];
+    return sum / buf.length / 255; // 0..1
+  }
+
+  // Animate: orb follows the bot's voice, rings follow YOUR voice
+  function startVisualizer() {
+    const botBuf = new Uint8Array(128);
+    const micBuf = new Uint8Array(128);
     const loop = () => {
-      analyser.getByteFrequencyData(data);
-      let sum = 0;
-      for (let i = 0; i < data.length; i++) sum += data[i];
-      const level = sum / data.length / 255; // 0..1
-      const s = 1 + level * 0.25;
-      orb.style.transform = `scale(${s})`;
-      ring1.style.transform = `scale(${1 + level * 0.45})`;
-      ring2.style.transform = `scale(${1 + level * 0.7})`;
+      const bot = botAnalyser ? levelOf(botAnalyser, botBuf) : 0;
+      const mic = micAnalyser && !muted ? levelOf(micAnalyser, micBuf) : 0;
+      orb.style.transform = `scale(${1 + bot * 0.3})`;
+      ring1.style.transform = `scale(${1 + mic * 0.5})`;
+      ring2.style.transform = `scale(${1 + mic * 0.8})`;
       rafId = requestAnimationFrame(loop);
     };
     loop();
   }
 
-  // Optional live transcripts via the RTVI data channel (best effort)
-  function attachDataChannel(pc) {
-    pc.ondatachannel = (ev) => {
-      ev.channel.onmessage = (msg) => {
-        try {
-          const d = JSON.parse(msg.data);
-          const t = d.type || (d.label ? d.label : "");
-          if (t.includes("transcript") || t.includes("Transcription") || t === "bot-tts-text") {
-            const text = (d.data && (d.data.text || d.data.transcript)) || d.text;
-            if (text) transcriptEl.textContent = text;
+  // RTVI data channel — WE create it (before createOffer, so it's in the SDP).
+  // Carries live transcripts + bot speaking events; pings keep the server happy.
+  function setupRtviChannel() {
+    dc = pc.createDataChannel("rtvi-ai", { ordered: true });
+    dc.onopen = () => {
+      dc.send(JSON.stringify({
+        id: "web-" + Date.now(),
+        label: "rtvi-ai",
+        type: "client-ready",
+        data: {},
+      }));
+      pingTimer = setInterval(() => {
+        if (dc && dc.readyState === "open") dc.send("ping-" + Date.now());
+      }, 1000);
+    };
+    dc.onmessage = (msg) => {
+      let d;
+      try { d = JSON.parse(msg.data); } catch (_) { return; }
+      const data = d.data || {};
+      switch (d.type) {
+        case "user-transcription":
+          if (data.text) {
+            transcriptEl.textContent = "You: " + data.text;
+            transcriptEl.style.opacity = data.final ? "1" : "0.65";
           }
-        } catch (_) { /* non-JSON frames are fine */ }
-      };
+          break;
+        case "bot-transcription":
+        case "bot-tts-text":
+          if (data.text) {
+            transcriptEl.textContent = "Fiva: " + data.text;
+            transcriptEl.style.opacity = "1";
+          }
+          break;
+        case "bot-started-speaking":
+          botSpeaking = true;
+          setStatus("Fiva is speaking…", true);
+          break;
+        case "bot-stopped-speaking":
+          botSpeaking = false;
+          setStatus("Connected — Fiva is listening", true);
+          break;
+      }
     };
   }
 
@@ -178,6 +217,12 @@
       startBtn.disabled = false;
       return;
     }
+
+    // Create the AudioContext HERE, inside the click gesture — otherwise the
+    // browser leaves it suspended and the orb never moves.
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume();
+    micAnalyser = makeAnalyser(micStream);
 
     setStatus("Connecting to Fiva…");
     pc = new RTCPeerConnection({
@@ -197,9 +242,10 @@
 
     pc.ontrack = (ev) => {
       botAudio.srcObject = ev.streams[0];
-      startVisualizer(ev.streams[0]);
+      botAnalyser = makeAnalyser(ev.streams[0]);
     };
-    attachDataChannel(pc);
+    setupRtviChannel();
+    startVisualizer();
 
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") {
@@ -235,6 +281,9 @@
 
   function cleanup() {
     if (rafId) cancelAnimationFrame(rafId);
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (dc) { try { dc.close(); } catch (_) {} dc = null; }
+    botAnalyser = null; micAnalyser = null; botSpeaking = false;
     if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
     if (pc) { try { pc.close(); } catch (_) {} pc = null; }
