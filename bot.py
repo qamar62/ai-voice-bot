@@ -12,6 +12,7 @@ interrupt the bot mid-sentence just by speaking).
 Run:  python bot.py   →  open http://localhost:7860/client
 """
 
+import asyncio
 import json
 import os
 import uuid
@@ -97,7 +98,17 @@ def load_agent_config() -> dict:
     config["system_prompt"] += (
         "\n\n[Voice Output Rules]\n"
         "Your reply is converted to speech. Plain sentences only — no markdown, "
-        "no bullet points, no emojis. Keep replies brief and natural."
+        "no bullet points, no labels like 'Activity:' or 'Date:', no emojis. "
+        "Keep replies brief and natural.\n"
+        "DATES: when speaking, ALWAYS say dates naturally — 'the twentieth of "
+        "July' — never digit formats like 2026-07-20. Convert any date from tool "
+        "results into natural words before speaking it. Customers say dates "
+        "naturally too ('twenty July') — convert them yourself to YYYY-MM-DD for "
+        "tools, assuming the next upcoming occurrence. NEVER ask the customer to "
+        "use a date format.\n"
+        "The call ALWAYS starts with your scripted greeting, which has already "
+        "been spoken. If the customer just says hello, warmly ask how you can "
+        "help — do NOT list activities unless they ask what's available."
         "\n\n[Tool Rules — CRITICAL]\n"
         "You have tools: list_activities, check_availability, create_booking, "
         "create_general_inquiry. NEVER invent activities, prices, availability, or "
@@ -119,7 +130,11 @@ def load_agent_config() -> dict:
         "accurate than spelling aloud. When they type something, treat it as "
         "exact and do not re-confirm the spelling. For spoken email, read it "
         "back once to confirm. "
-        "Then read back the full summary, and after the customer confirms call "
+        "Then read back the summary as ONE flowing natural sentence, for example: "
+        "'So that's the Dubai City Tour combo for two people sharing, on the "
+        "twentieth of July, pickup from Marina, under the name Qamar Shahzad — "
+        "shall I confirm?' Do not read the phone or email back again in the "
+        "summary, and never use list labels. After the customer confirms call "
         "create_booking. If the tool replies that fields are missing, ask for "
         "exactly those and try again. Give them the request reference number and "
         "explain the Five Tours team will contact them shortly to finalize. Do NOT "
@@ -414,6 +429,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         greeted = True
         if agent["assistant_speaks_first"]:
             if agent["first_message"]:
+                # Small delay so the audio path is fully up before the greeting
+                # plays — otherwise the first words can be cut off or lost.
+                await asyncio.sleep(0.6)
                 # Speak the exact scripted greeting, and record it in context
                 context.add_message(
                     {"role": "assistant", "content": agent["first_message"]}
