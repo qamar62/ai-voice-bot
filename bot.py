@@ -26,7 +26,11 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import LLMRunFrame, TTSSpeakFrame
+from pipecat.frames.frames import (
+    FunctionCallResultProperties,
+    LLMRunFrame,
+    TTSSpeakFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -124,6 +128,8 @@ def load_agent_config() -> dict:
         "suppliers, complaints, callback requests): collect topic, details, name, "
         "phone and preferred callback time, then call create_general_inquiry and "
         "confirm the team will call back.\n"
+        "After ANY tool returns, immediately tell the customer the outcome — never "
+        "stay silent or wait for them to ask. "
         "If a tool fails, apologize and offer a callback instead of guessing."
     )
     return config
@@ -345,7 +351,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             )
         summary = data.get("summary", json.dumps(data))
         logger.info(f"tool {params.function_name} -> {summary[:200]}")
-        await params.result_callback(data)
+        # Small models sometimes go silent after a tool result. Make the next
+        # step unmissable, and explicitly force the LLM to run again.
+        data["instruction"] = (
+            "Tell the customer this result now, in one or two short spoken sentences."
+        )
+        await params.result_callback(
+            data, properties=FunctionCallResultProperties(run_llm=True)
+        )
 
     llm.register_function("list_activities", handle_booking_tool)
     llm.register_function("check_availability", handle_booking_tool)
