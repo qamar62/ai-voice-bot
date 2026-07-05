@@ -30,7 +30,7 @@ services:
       --listening-port=3478
       --min-port=49160 --max-port=49200
       --realm=turn.five.tours
-      --user=fiva:qam600
+      --user=fiva:36d0680a0cb366f736c7341389092658a9e64611d0a25acd
       --lt-cred-mech
       --fingerprint
       --no-cli
