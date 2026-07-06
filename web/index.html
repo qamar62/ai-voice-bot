@@ -211,6 +211,33 @@
       border: 1px solid rgba(255, 255, 255, 0.3);
     }
 
+    .langs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .langs button {
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 16px;
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: rgba(255, 255, 255, 0.75);
+    }
+
+    .langs button.active {
+      background: var(--teal-500);
+      border-color: var(--teal-300);
+      color: #fff;
+      box-shadow: 0 0 18px rgba(18, 130, 122, 0.5);
+    }
+
+    .langs button:hover {
+      border-color: var(--teal-300);
+    }
+
     .controls {
       display: flex;
       gap: 14px;
@@ -306,6 +333,14 @@
     <button id="typeSend">Send</button>
   </div>
 
+  <div class="langs" id="langRow">
+    <button data-lang="en" class="active">🇬🇧 English</button>
+    <button data-lang="ar">🇦🇪 العربية</button>
+    <button data-lang="ru">🇷🇺 Русский</button>
+    <button data-lang="es">🇪🇸 Español</button>
+    <button data-lang="pt">🇵🇹 Português</button>
+  </div>
+
   <div class="controls">
     <button id="startBtn">▶ &nbsp;Start call</button>
     <button id="muteBtn">🎙 Mute</button>
@@ -332,6 +367,16 @@
       const typeInput = document.getElementById("typeInput");
       const typeSend = document.getElementById("typeSend");
       const botAudio = document.getElementById("botAudio");
+      const langRow = document.getElementById("langRow");
+
+      // --- language picker (before the call starts) ---------------------------
+      let callLang = "en";
+      langRow.addEventListener("click", (e) => {
+        const btn = e.target.closest("button[data-lang]");
+        if (!btn || pc) return; // can't switch mid-call
+        callLang = btn.dataset.lang;
+        langRow.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === btn));
+      });
 
       // --- chat log helpers ---------------------------------------------------
       let interimUserEl = null;   // live (not yet final) user speech bubble
@@ -535,7 +580,11 @@
           const resp = await fetch(API_OFFER, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+            body: JSON.stringify({
+              sdp: pc.localDescription.sdp,
+              type: pc.localDescription.type,
+              request_data: { language: callLang },
+            }),
           });
           if (!resp.ok) throw new Error("HTTP " + resp.status);
           const answer = await resp.json();

@@ -9,3 +9,6 @@ __pycache__/
 
 # Logs / runtime
 *.log
+env/
+.env
+env/*

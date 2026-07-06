@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import aiohttp
 import httpx
 from dotenv import load_dotenv
 from loguru import logger
@@ -42,9 +43,11 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
+from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.nvidia.llm import NvidiaLLMService
 from pipecat.services.nvidia.stt import NvidiaSTTService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import (
     SpeechTimeoutUserTurnStopStrategy,
@@ -62,6 +65,46 @@ DEFAULT_SYSTEM_PROMPT = (
     "conversational — they will be spoken aloud. Never use markdown, lists, "
     "or emojis. Spell out numbers as words."
 )
+
+# Supported call languages. The visitor picks one on the voice page before the
+# call; it arrives via request_data in /api/offer (runner_args.body).
+#  - English keeps the fast streaming Riva/Deepgram STT.
+#  - Other languages use ElevenLabs Scribe STT (segmented, 90+ languages).
+#  - TTS voice per language comes from .env (voice_env), falling back to the
+#    default ELEVENLABS_VOICE_ID — eleven_flash_v2_5 is multilingual, so the
+#    default voice can speak all of these.
+LANGUAGES = {
+    "en": {
+        "name": "English",
+        "language": Language.EN,
+        "voice_env": "ELEVENLABS_VOICE_ID",
+        "greeting": "",  # uses the configured first_message from agents.json
+    },
+    "ar": {
+        "name": "Arabic",
+        "language": Language.AR,
+        "voice_env": "ELEVENLABS_VOICE_ID_AR",
+        "greeting": "مساء الخير، معك فايف فيرتكس تورز. أنا فيفا، كيف يمكنني مساعدتك؟",
+    },
+    "ru": {
+        "name": "Russian",
+        "language": Language.RU,
+        "voice_env": "ELEVENLABS_VOICE_ID_RU",
+        "greeting": "Добрый день! Вы обратились в Five Vertex Tours. Меня зовут Фива. Чем я могу вам помочь?",
+    },
+    "es": {
+        "name": "Spanish",
+        "language": Language.ES,
+        "voice_env": "ELEVENLABS_VOICE_ID_ES",
+        "greeting": "¡Buenas tardes! Ha contactado con Five Vertex Tours. Soy Fiva, ¿en qué puedo ayudarle?",
+    },
+    "pt": {
+        "name": "Portuguese",
+        "language": Language.PT,
+        "voice_env": "ELEVENLABS_VOICE_ID_PT",
+        "greeting": "Boa tarde! Entrou em contacto com a Five Vertex Tours. Eu sou a Fiva, como posso ajudar?",
+    },
+}
 
 
 def load_agent_config() -> dict:
@@ -266,26 +309,65 @@ async def call_backend(method: str, path: str, **kwargs) -> dict:
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     agent = load_agent_config()
     session_id = str(uuid.uuid4())
-    logger.info("Starting Fiva realtime voice bot")
+
+    # --- Language (picked on the voice page before the call) --------------
+    body = getattr(runner_args, "body", None) or {}
+    lang_code = str(body.get("language", "en")).lower() if isinstance(body, dict) else "en"
+    if lang_code not in LANGUAGES:
+        lang_code = "en"
+    lang = LANGUAGES[lang_code]
+    logger.info(f"Starting Fiva realtime voice bot — language: {lang['name']}")
+
+    if lang_code != "en":
+        # Scripted greeting in the caller's language
+        if lang["greeting"]:
+            agent["first_message"] = lang["greeting"]
+        # Keep the whole conversation in that language; tools stay English/ISO
+        agent["system_prompt"] += (
+            f"\n\n[Language — CRITICAL]\n"
+            f"The customer speaks {lang['name']}. Conduct the ENTIRE conversation "
+            f"in {lang['name']} — every reply, question, and confirmation. "
+            f"Never switch to English unless the customer does. "
+            f"Tools are the exception: pass dates as YYYY-MM-DD and activity "
+            f"names in English to tools, then explain the results to the "
+            f"customer in {lang['name']}. Spell out numbers as words in "
+            f"{lang['name']}."
+        )
 
     # --- AI services (all streaming) -------------------------------------
     nvidia_api_key = os.getenv("NVIDIA_API_KEY", "")
+    elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    aiohttp_session: aiohttp.ClientSession | None = None
 
-    # STT: NVIDIA Riva Parakeet (streaming ASR) — uses the same NVIDIA key.
-    # If you ever prefer Deepgram, set DEEPGRAM_API_KEY and it takes over.
-    if os.getenv("DEEPGRAM_API_KEY"):
+    if lang_code != "en":
+        # Non-English: ElevenLabs Scribe STT (segmented, transcribes after each
+        # turn — slightly slower than streaming Riva, but supports 90+ languages).
+        aiohttp_session = aiohttp.ClientSession()
+        stt = ElevenLabsSTTService(
+            api_key=elevenlabs_api_key,
+            aiohttp_session=aiohttp_session,
+            params=ElevenLabsSTTService.InputParams(language=lang["language"]),
+        )
+        logger.info(f"STT: ElevenLabs Scribe ({lang['name']})")
+    elif os.getenv("DEEPGRAM_API_KEY"):
+        # If you ever prefer Deepgram, set DEEPGRAM_API_KEY and it takes over.
         from pipecat.services.deepgram.stt import DeepgramSTTService
 
         stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
         logger.info("STT: Deepgram")
     else:
+        # STT: NVIDIA Riva Parakeet (streaming ASR) — uses the same NVIDIA key.
         stt = NvidiaSTTService(api_key=nvidia_api_key)
         logger.info("STT: NVIDIA Riva (parakeet)")
 
+    default_voice = os.getenv("ELEVENLABS_VOICE_ID", "DODLEQrClDo8wCz460ld")
+    voice_id = os.getenv(lang["voice_env"], "") or default_voice
     tts = ElevenLabsTTSService(
-        api_key=os.getenv("ELEVENLABS_API_KEY", ""),
-        voice_id=os.getenv("ELEVENLABS_VOICE_ID", "DODLEQrClDo8wCz460ld"),
+        api_key=elevenlabs_api_key,
+        voice_id=voice_id,
         model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+        # Pin pronunciation/accent to the call language (flash v2.5 is multilingual)
+        params=ElevenLabsTTSService.InputParams(language=lang["language"]),
         # Strip any markdown (*, **, #, tables) the LLM sneaks in before speaking
         text_filters=[MarkdownTextFilter()],
     )
@@ -449,7 +531,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.run(task)
+    try:
+        await runner.run(task)
+    finally:
+        if aiohttp_session:
+            await aiohttp_session.close()
 
 
 async def bot(runner_args: RunnerArguments):
