@@ -35,4 +35,5 @@ services:
       --fingerprint
       --no-cli
       --no-tls --no-dtls
+      --external-ip=92.99.72.13/192.168.1.71
     restart: unless-stopped

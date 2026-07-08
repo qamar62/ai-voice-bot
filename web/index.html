@@ -543,7 +543,10 @@
             // TURN relay — required because signaling runs through Cloudflare Tunnel
             // (audio can't pass the tunnel). Must match your coturn user/secret.
             {
-              urls: "turn:turn.five.tours:3478",
+              urls: [
+                "turn:turn.five.tours:3478?transport=udp",
+                "turn:turn.five.tours:3478?transport=tcp",
+              ],
               username: "fiva",
               credential: "36d0680a0cb366f736c7341389092658a9e64611d0a25acd",
             },
