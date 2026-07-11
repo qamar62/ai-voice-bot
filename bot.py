@@ -41,6 +41,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
@@ -164,7 +165,10 @@ def load_agent_config() -> dict:
         "ninety-nine'). NEVER read out the full list, never use asterisks or "
         "bullet points. Offer to mention more if they want.\n"
         "- Before stating any price, availability, or minimum-person rule → call "
-        "check_availability.\n"
+        "check_availability, passing ONLY what the customer actually said. If "
+        "they haven't given a date, do not send one and do not mention "
+        "availability — quote the price and ask which date they'd like. NEVER "
+        "state availability for a date the customer didn't request.\n"
         "- Activity booking: you MUST collect ALL of these before calling "
         "create_booking — activity, date, number of persons, sharing or private, "
         "pickup location, full name, phone number, and email address. Ask for "
@@ -236,20 +240,28 @@ def make_booking_tools() -> ToolsSchema:
     check_availability = FunctionSchema(
         name="check_availability",
         description=(
-            "Check day-wise availability, pricing and minimum-person rules for an "
-            "activity. Call this BEFORE quoting any price or availability."
+            "Check pricing and minimum-person rules for an activity, and — only "
+            "if the customer stated a date — its day-wise availability. Pass ONLY "
+            "details the customer actually said. NEVER invent a date or persons "
+            "count; omit them if not given."
         ),
         properties={
             "activity": {"type": "string", "description": "Activity or tour name"},
-            "date": {"type": "string", "description": "Requested day, e.g. 2026-07-17"},
-            "persons": {"type": "integer", "description": "Number of persons"},
+            "date": {
+                "type": "string",
+                "description": "YYYY-MM-DD — ONLY if the customer stated a date. Omit otherwise.",
+            },
+            "persons": {
+                "type": "integer",
+                "description": "ONLY if the customer stated how many people. Omit otherwise.",
+            },
             "booking_type": {
                 "type": "string",
                 "enum": ["sharing", "private"],
                 "description": "Sharing or private booking",
             },
         },
-        required=["activity", "date", "persons"],
+        required=["activity"],
     )
     create_booking = FunctionSchema(
         name="create_booking",
@@ -492,38 +504,57 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ]
     )
 
+    rtvi = RTVIProcessor()
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        rtvi_processor=rtvi,
     )
 
     greeted = False
 
-    @transport.event_handler("on_client_connected")
-    async def on_client_connected(transport, client):
+    async def greet():
         nonlocal greeted
-        logger.info("Client connected")
-        if greeted:
+        if greeted or not agent["assistant_speaks_first"]:
             return
         greeted = True
-        if agent["assistant_speaks_first"]:
-            if agent["first_message"]:
-                # Small delay so the audio path is fully up before the greeting
-                # plays — otherwise the first words can be cut off or lost.
-                await asyncio.sleep(0.6)
-                # Speak the exact scripted greeting, and record it in context
-                context.add_message(
-                    {"role": "assistant", "content": agent["first_message"]}
-                )
-                await task.queue_frames([TTSSpeakFrame(agent["first_message"])])
-            else:
-                context.add_message(
-                    {"role": "system", "content": "Greet the caller briefly."}
-                )
-                await task.queue_frames([LLMRunFrame()])
+        if agent["first_message"]:
+            # Speak the exact scripted greeting, and record it in context
+            context.add_message(
+                {"role": "assistant", "content": agent["first_message"]}
+            )
+            await task.queue_frames([TTSSpeakFrame(agent["first_message"])])
+        else:
+            context.add_message(
+                {"role": "system", "content": "Greet the caller briefly."}
+            )
+            await task.queue_frames([LLMRunFrame()])
+
+    # Best timing: greet when the client says it's ready (data channel open,
+    # audio path fully established) — no audio gets lost.
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi_proc):
+        logger.info("Client ready — greeting")
+        await rtvi_proc.set_bot_ready()
+        await greet()
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Client connected")
+
+        # Fallback: if the client never sends client-ready (e.g. a plain
+        # WebRTC client without RTVI), greet a few seconds after connect.
+        async def delayed_greet():
+            await asyncio.sleep(3)
+            if not greeted:
+                logger.info("No client-ready received — fallback greeting")
+                await greet()
+
+        asyncio.create_task(delayed_greet())
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
