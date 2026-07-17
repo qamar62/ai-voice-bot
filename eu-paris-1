@@ -1,0 +1,6 @@
+[DEFAULT]
+user=ocid1.user.oc1..aaaaaaaafdhbiqb4jc6x7dwtt44xn7wc2w2nowjnnm7x5hmvexa6r7c6jjoa
+fingerprint=eb:89:8f:51:d0:8f:53:26:29:53:9c:40:ca:16:79:5d
+key_file=/Users/apple/.oci/oci_api_key.pem
+tenancy=ocid1.tenancy.oc1..aaaaaaaaw7lhqsneuqeii25o5uq4ltp4lv32wlvkga5jpv5ajnkpejv4qjwq
+region=eu-paris-1
