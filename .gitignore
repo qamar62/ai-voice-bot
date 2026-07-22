@@ -12,3 +12,6 @@ __pycache__/
 env/
 .env
 env/*
+
+# settings.json contains API keys — only agents.json belongs in git
+data/settings.json

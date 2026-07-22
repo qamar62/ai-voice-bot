@@ -7,7 +7,7 @@ services:
     # individually is impractical. Host mode gives aiortc direct access.
     network_mode: host
     volumes:
-      - ../data:/app/data:ro    # agents.json / settings.json (Fiva's prompt)
+      - ./data:/app/data:ro    # agents.json (Fiva's prompt + greeting) — in this repo
     restart: unless-stopped
 
   voice-web:
