@@ -146,18 +146,23 @@ def load_agent_config() -> dict:
         "Keep replies brief and natural.\n"
         "DATES: when speaking, ALWAYS say dates naturally — 'the twentieth of "
         "July' — never digit formats like 2026-07-20. Convert any date from tool "
-        "results into natural words before speaking it. Customers say dates "
-        "naturally too ('twenty July') — convert them yourself to YYYY-MM-DD for "
-        "tools, assuming the next upcoming occurrence. NEVER ask the customer to "
-        "use a date format.\n"
+        "results into natural words before speaking it. When a customer says a "
+        "date, pass it to tools EXACTLY as they said it ('twenty nine of July' "
+        "is fine) — the system understands and converts it. NEVER ask the "
+        "customer to use or repeat any date format.\n"
         "The call ALWAYS starts with your scripted greeting, which has already "
         "been spoken. If the customer just says hello, warmly ask how you can "
         "help — do NOT list activities unless they ask what's available."
         "\n\n[Tool Rules — CRITICAL]\n"
         "You have tools: list_activities, check_availability, create_booking, "
         "create_general_inquiry. NEVER invent activities, prices, availability, or "
-        "references — only repeat what tools return. Dates passed to tools must be "
-        "YYYY-MM-DD.\n"
+        "references — only repeat what tools return. Pass dates to tools exactly "
+        "as the customer said them; the system converts them.\n"
+        "HONESTY: NEVER tell the customer something was registered, booked, or "
+        "requested unless you actually called the tool AND it returned success "
+        "with a reference. A callback request still needs name and phone number "
+        "collected and create_general_inquiry called — without that, nothing is "
+        "saved and you must not claim it is.\n"
         "- Customer asks what you offer → call list_activities, then mention only "
         "the TWO or THREE most relevant options woven into one natural spoken "
         "sentence with prices (e.g. 'We have the Evening Desert Safari at one "
@@ -249,7 +254,7 @@ def make_booking_tools() -> ToolsSchema:
             "activity": {"type": "string", "description": "Activity or tour name"},
             "date": {
                 "type": "string",
-                "description": "YYYY-MM-DD — ONLY if the customer stated a date. Omit otherwise.",
+                "description": "The date exactly as the customer said it, any wording — ONLY if they stated one. Omit otherwise.",
             },
             "persons": {
                 "type": "integer",
@@ -272,7 +277,7 @@ def make_booking_tools() -> ToolsSchema:
         ),
         properties={
             "activity": {"type": "string"},
-            "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "date": {"type": "string", "description": "As the customer said it — system converts"},
             "persons": {"type": "integer"},
             "booking_type": {"type": "string", "enum": ["sharing", "private"]},
             "pickup_location": {"type": "string"},
@@ -300,6 +305,67 @@ def make_booking_tools() -> ToolsSchema:
     return ToolsSchema(
         standard_tools=[list_activities, check_availability, create_booking, create_general_inquiry]
     )
+
+
+_WORD_NUMBERS = {
+    # compounds first (dict order preserved), cardinals + ordinals
+    "twenty first": "21", "twenty second": "22", "twenty third": "23",
+    "twenty fourth": "24", "twenty fifth": "25", "twenty sixth": "26",
+    "twenty seventh": "27", "twenty eighth": "28", "twenty ninth": "29",
+    "thirty first": "31",
+    "twenty one": "21", "twenty two": "22", "twenty three": "23",
+    "twenty four": "24", "twenty five": "25", "twenty six": "26",
+    "twenty seven": "27", "twenty eight": "28", "twenty nine": "29",
+    "thirty one": "31", "thirtieth": "30", "twentieth": "20",
+    "thirty": "30", "twenty": "20",
+    "eleventh": "11", "twelfth": "12", "thirteenth": "13", "fourteenth": "14",
+    "fifteenth": "15", "sixteenth": "16", "seventeenth": "17",
+    "eighteenth": "18", "nineteenth": "19",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19",
+    "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
+    "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10",
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+}
+
+
+def normalize_spoken_date(raw) -> str:
+    """'twenty nine of July' / '29 июля' / 'el 29 de julio' -> '2026-07-29'.
+
+    The LLM passes dates exactly as the customer said them; we convert here so
+    the model never has to ask customers about date formats.
+    """
+    import re as _re
+
+    raw = str(raw or "").strip()
+    if not raw:
+        return ""
+    if _re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        return raw
+
+    # Spell out English number-words ("twenty nine of July" -> "29 July")
+    text = raw.lower().replace("-", " ")
+    for word, digit in _WORD_NUMBERS.items():  # dict order: longest first
+        text = _re.sub(rf"\b{word}\b", digit, text)
+    # Strip filler words/articles (English of/the, Spanish el/de, Portuguese do/dia)
+    text = _re.sub(r"\b(of|the|el|la|del|de|do|da|dia|día|on)\b", " ", text)
+    text = _re.sub(r"\s+", " ", text).strip()
+
+    try:
+        import dateparser
+
+        settings = {"PREFER_DATES_FROM": "future", "RELATIVE_BASE": datetime.now()}
+        dt = (
+            dateparser.parse(text, settings=settings)
+            or dateparser.parse(text, languages=["en"], settings=settings)
+            or dateparser.parse(text, languages=["ar", "ru", "es", "pt"], settings=settings)
+        )
+        return dt.date().isoformat() if dt else ""
+    except Exception as e:
+        logger.warning(f"Date parse failed for '{raw}': {e}")
+        return ""
 
 
 async def call_backend(method: str, path: str, **kwargs) -> dict:
@@ -434,7 +500,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 "/bookings/voice/availability/",
                 params={
                     "activity": args.get("activity", ""),
-                    "date": args.get("date", ""),
+                    "date": normalize_spoken_date(args.get("date", "")),
                     "persons": args.get("persons", 1),
                     "booking_type": args.get("booking_type", "sharing"),
                 },
@@ -446,7 +512,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 json={
                     "session_id": session_id,
                     "activity_name": args.get("activity", ""),
-                    "requested_date": args.get("date"),
+                    "requested_date": normalize_spoken_date(args.get("date")) or None,
                     "participants": args.get("persons", 1),
                     "booking_type": args.get("booking_type", "sharing"),
                     "pickup_location": args.get("pickup_location", ""),
@@ -523,10 +589,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             return
         greeted = True
         if agent["first_message"]:
-            # Speak the exact scripted greeting, and record it in context
-            context.add_message(
-                {"role": "assistant", "content": agent["first_message"]}
-            )
+            # Speak the exact scripted greeting. No manual context.add_message —
+            # the assistant aggregator records spoken TTS into context itself
+            # (adding it manually produced a duplicate greeting in history).
             await task.queue_frames([TTSSpeakFrame(agent["first_message"])])
         else:
             context.add_message(

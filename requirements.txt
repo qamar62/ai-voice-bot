@@ -1,4 +1,5 @@
 pipecat-ai[webrtc,runner,deepgram,elevenlabs,openai,riva,silero]~=0.0.108
+dateparser
 # Pinned: newer llvmlite/numba have no prebuilt wheels for Intel-mac Python
 # and try to compile LLVM from source. These are the newest with wheels.
 llvmlite==0.45.1
