@@ -539,8 +539,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     @rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi_proc):
         logger.info("Client ready — greeting")
-        await rtvi_proc.set_bot_ready()
-        await greet()
+        await greet()  # greet FIRST — set_bot_ready must never block it
+        try:
+            await rtvi_proc.set_bot_ready()
+        except Exception as e:
+            logger.warning(f"set_bot_ready failed (non-fatal): {e}")
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
