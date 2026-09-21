@@ -3,7 +3,7 @@
 
 Fully streaming pipeline (Pipecat):
 
-    browser mic ──WebRTC──▶ Deepgram STT ─▶ OpenRouter LLM ─▶ ElevenLabs TTS ──WebRTC──▶ browser speaker
+    browser mic ──WebRTC──▶ STT (Scribe/Deepgram/OpenAI) ─▶ Claude or OpenAI LLM ─▶ ElevenLabs TTS ──WebRTC──▶ browser speaker
 
 Every stage streams, so the bot starts speaking while the LLM is still
 generating. Silero VAD gives natural turn-taking and barge-in (you can
@@ -46,8 +46,6 @@ from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-from pipecat.services.nvidia.llm import NvidiaLLMService
-from pipecat.services.nvidia.stt import NvidiaSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import (
@@ -69,8 +67,8 @@ DEFAULT_SYSTEM_PROMPT = (
 
 # Supported call languages. The visitor picks one on the voice page before the
 # call; it arrives via request_data in /api/offer (runner_args.body).
-#  - English keeps the fast streaming Riva/Deepgram STT.
-#  - Other languages use ElevenLabs Scribe STT (segmented, 90+ languages).
+#  - STT: ElevenLabs Scribe for all languages by default (segmented, 90+ languages).
+#    English can use Deepgram (DEEPGRAM_API_KEY) or OpenAI (STT_PROVIDER=openai).
 #  - TTS voice per language comes from .env (voice_env), falling back to the
 #    default ELEVENLABS_VOICE_ID — eleven_flash_v2_5 is multilingual, so the
 #    default voice can speak all of these.
@@ -413,13 +411,28 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         )
 
     # --- AI services (all streaming) -------------------------------------
-    nvidia_api_key = os.getenv("NVIDIA_API_KEY", "")
     elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
     aiohttp_session: aiohttp.ClientSession | None = None
+    stt_provider = os.getenv("STT_PROVIDER", "elevenlabs").lower()
 
-    if lang_code != "en":
-        # Non-English: ElevenLabs Scribe STT (segmented, transcribes after each
-        # turn — slightly slower than streaming Riva, but supports 90+ languages).
+    if lang_code == "en" and os.getenv("DEEPGRAM_API_KEY"):
+        # Streaming STT (fastest for English) — set DEEPGRAM_API_KEY to enable.
+        from pipecat.services.deepgram.stt import DeepgramSTTService
+
+        stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+        logger.info("STT: Deepgram")
+    elif stt_provider == "openai":
+        # OpenAI transcription (segmented — transcribes after each user turn).
+        from pipecat.services.openai.stt import OpenAISTTService
+
+        stt = OpenAISTTService(
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe"),
+            language=lang["language"],
+        )
+        logger.info(f"STT: OpenAI ({lang['name']})")
+    else:
+        # Default: ElevenLabs Scribe (segmented, 90+ languages) — same key as TTS.
         aiohttp_session = aiohttp.ClientSession()
         stt = ElevenLabsSTTService(
             api_key=elevenlabs_api_key,
@@ -427,16 +440,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             params=ElevenLabsSTTService.InputParams(language=lang["language"]),
         )
         logger.info(f"STT: ElevenLabs Scribe ({lang['name']})")
-    elif os.getenv("DEEPGRAM_API_KEY"):
-        # If you ever prefer Deepgram, set DEEPGRAM_API_KEY and it takes over.
-        from pipecat.services.deepgram.stt import DeepgramSTTService
-
-        stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-        logger.info("STT: Deepgram")
-    else:
-        # STT: NVIDIA Riva Parakeet (streaming ASR) — uses the same NVIDIA key.
-        stt = NvidiaSTTService(api_key=nvidia_api_key)
-        logger.info("STT: NVIDIA Riva (parakeet)")
 
     default_voice = os.getenv("ELEVENLABS_VOICE_ID", "DODLEQrClDo8wCz460ld")
     voice_id = os.getenv(lang["voice_env"], "") or default_voice
@@ -450,8 +453,20 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         text_filters=[MarkdownTextFilter()],
     )
 
-    # LLM: NVIDIA NIM by default; set LLM_PROVIDER=openrouter to switch.
-    if os.getenv("LLM_PROVIDER", "nvidia").lower() == "openrouter":
+    # LLM: Claude by default. LLM_PROVIDER = anthropic | openai | openrouter
+    llm_provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+    if llm_provider == "openai":
+        from pipecat.services.openai.llm import OpenAILLMService
+
+        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+        llm = OpenAILLMService(
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            settings=OpenAILLMService.Settings(
+                model=model, temperature=0.4, max_tokens=300
+            ),
+        )
+        logger.info(f"LLM: OpenAI ({model})")
+    elif llm_provider == "openrouter":
         from pipecat.services.openrouter.llm import OpenRouterLLMService
 
         llm = OpenRouterLLMService(
@@ -462,13 +477,19 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         )
         logger.info("LLM: OpenRouter")
     else:
-        llm = NvidiaLLMService(
-            api_key=nvidia_api_key,
-            settings=NvidiaLLMService.Settings(
-                model=os.getenv("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct"),
+        from pipecat.services.anthropic.llm import AnthropicLLMService
+
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        llm = AnthropicLLMService(
+            api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            settings=AnthropicLLMService.Settings(
+                model=model,
+                temperature=0.4,
+                max_tokens=300,  # spoken replies are short
+                enable_prompt_caching=True,  # long system prompt → faster/cheaper turns
             ),
         )
-        logger.info(f"LLM: NVIDIA NIM ({os.getenv('NVIDIA_MODEL', 'meta/llama-3.1-8b-instruct')})")
+        logger.info(f"LLM: Anthropic ({model})")
 
     # --- Booking tools (call the Five Vertex Django API directly) ----------
     async def handle_booking_tool(params):
