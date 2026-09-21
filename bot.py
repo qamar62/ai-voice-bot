@@ -484,7 +484,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             settings=AnthropicLLMService.Settings(
                 model=model,
-                temperature=0.4,
                 max_tokens=300,  # spoken replies are short
                 enable_prompt_caching=True,  # long system prompt → faster/cheaper turns
             ),
