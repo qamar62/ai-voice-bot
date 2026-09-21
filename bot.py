@@ -56,6 +56,28 @@ from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
 
 load_dotenv(override=True)
 
+# --- Fix: Pipecat 0.0.108 crashes ('role') when Claude returns a thinking
+# block with empty text (newer Claude models). Pass it back as a valid
+# thinking block instead of an invalid role-less message.
+from pipecat.adapters.services.anthropic_adapter import AnthropicLLMAdapter as _AnthAdapter
+
+_orig_from_specific = _AnthAdapter._from_anthropic_specific_message
+
+
+def _safe_from_specific(self, message):
+    m = message.message
+    if isinstance(m, dict) and m.get("type") == "thought" and m.get("signature"):
+        return {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": m.get("text") or "", "signature": m["signature"]}
+            ],
+        }
+    return _orig_from_specific(self, message)
+
+
+_AnthAdapter._from_anthropic_specific_message = _safe_from_specific
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR.parent / "data"
 
