@@ -28,6 +28,7 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     FunctionCallResultProperties,
     LLMRunFrame,
@@ -404,6 +405,50 @@ async def call_backend(method: str, path: str, **kwargs) -> dict:
         return {"summary": "The booking system is temporarily unreachable."}
 
 
+# --- Near-field voice focus ------------------------------------------------
+# Goal: only the person close to the mic counts. Two layers:
+#  1. A noise filter on incoming audio (music, TV, traffic, crowd murmur).
+#  2. A stricter VAD: distant voices are quieter, so a higher volume and
+#     confidence floor stops them from starting a turn or interrupting the bot.
+# Every value can be tuned from .env without code changes.
+def make_input_filter():
+    mode = os.getenv("NOISE_FILTER", "rnnoise").lower()
+    if mode == "aic" and os.getenv("AIC_LICENSE_KEY") and os.getenv("AIC_MODEL_ID"):
+        # ai-coustics: paid, but specifically suppresses background *speakers*.
+        try:
+            from pathlib import Path
+            from pipecat.audio.filters.aic_filter import AICFilter
+            logger.info("Input filter: ai-coustics")
+            return AICFilter(
+                license_key=os.getenv("AIC_LICENSE_KEY"),
+                model_id=os.getenv("AIC_MODEL_ID"),
+                model_download_dir=Path(os.getenv("AIC_MODEL_DIR", "data/aic_models")),
+                enhancement_level=float(os.getenv("AIC_LEVEL", "1.0")),
+            )
+        except Exception as e:
+            logger.warning(f"ai-coustics filter unavailable ({e}); falling back to RNNoise")
+            mode = "rnnoise"
+    if mode == "rnnoise":
+        try:
+            from pipecat.audio.filters.rnnoise_filter import RNNoiseFilter
+            logger.info("Input filter: RNNoise")
+            return RNNoiseFilter()
+        except Exception as e:
+            logger.warning(f"RNNoise unavailable ({e}); running without input filter")
+    return None
+
+
+def make_vad():
+    params = VADParams(
+        confidence=float(os.getenv("VAD_CONFIDENCE", "0.8")),   # default 0.7
+        start_secs=float(os.getenv("VAD_START_SECS", "0.3")),   # default 0.2
+        stop_secs=float(os.getenv("VAD_STOP_SECS", "0.2")),
+        min_volume=float(os.getenv("VAD_MIN_VOLUME", "0.75")),  # default 0.6 — main far-voice gate
+    )
+    logger.info(f"VAD: {params}")
+    return SileroVADAnalyzer(params=params)
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     agent = load_agent_config()
     session_id = str(uuid.uuid4())
@@ -590,7 +635,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),  # turn-taking + barge-in
+            vad_analyzer=make_vad(),  # turn-taking + barge-in (near-voice tuned)
             user_turn_strategies=UserTurnStrategies(
                 # Simple + reliable: end the user's turn after a 0.8s pause.
                 # (The default smart-turn ML model can stall on some setups.)
@@ -685,6 +730,7 @@ async def bot(runner_args: RunnerArguments):
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            audio_in_filter=make_input_filter(),  # strip music/background noise
         ),
     }
     transport = await create_transport(runner_args, transport_params)

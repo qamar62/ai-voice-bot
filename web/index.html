@@ -522,7 +522,15 @@
         setStatus("Requesting microphone…");
         try {
           micStream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              // AGC off: it boosts distant voices up to the same loudness as the
+              // caller, which defeats the server's near-voice volume gate.
+              autoGainControl: false,
+              channelCount: 1,
+              voiceIsolation: true, // Chrome/Safari: isolate the main speaker where supported (ignored elsewhere)
+            },
           });
         } catch (e) {
           setStatus("Microphone blocked — allow access and retry");
